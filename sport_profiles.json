@@ -1,0 +1,139 @@
+{
+  "cricket_bowling": {
+    "display_name": "Cricket Bowling",
+    "action_phase_start": 0.5,
+    "weights": {
+      "arm_alignment": 0.30,
+      "hip_rotation": 0.25,
+      "timing_sync": 0.25,
+      "wrist_position": 0.20
+    },
+    "key_joint_groups": {
+      "arm_alignment": [11, 13, 15, 12, 14, 16],
+      "hip_rotation": [23, 24, 11, 12],
+      "wrist_position": [15, 16, 13, 14]
+    },
+    "timing_critical": true,
+    "timing_weight_override": null,
+    "overlap_sports": ["baseball_pitching"],
+    "notes": "Bowling arm shoulder-elbow-wrist chain is primary. Hip-shoulder separation is key differentiator from baseball."
+  },
+
+  "football_freekick": {
+    "display_name": "Football Free Kick",
+    "action_phase_start": 0.4,
+    "weights": {
+      "arm_alignment": 0.10,
+      "hip_rotation": 0.35,
+      "timing_sync": 0.30,
+      "leg_extension": 0.25
+    },
+    "key_joint_groups": {
+      "arm_alignment": [11, 12, 13, 14],
+      "hip_rotation": [23, 24, 11, 12],
+      "leg_extension": [23, 25, 27, 24, 26, 28]
+    },
+    "timing_critical": true,
+    "timing_weight_override": null,
+    "overlap_sports": [],
+    "notes": "Kicking leg extension and hip drive dominate. Arms provide balance — low weight."
+  },
+
+  "gym_pushup": {
+    "display_name": "Push Up",
+    "action_phase_start": 0.0,
+    "weights": {
+      "arm_alignment": 0.40,
+      "hip_rotation": 0.30,
+      "timing_sync": 0.15,
+      "back_straightness": 0.15
+    },
+    "key_joint_groups": {
+      "arm_alignment": [11, 13, 15, 12, 14, 16],
+      "hip_rotation": [23, 24, 25, 26],
+      "back_straightness": [11, 23, 25, 12, 24, 26]
+    },
+    "timing_critical": false,
+    "timing_weight_override": null,
+    "overlap_sports": [],
+    "notes": "Elbow angle and back planarity are primary. Timing matters less than positional accuracy."
+  },
+
+  "badminton_smash": {
+    "display_name": "Badminton Smash",
+    "action_phase_start": 0.4,
+    "weights": {
+      "arm_alignment": 0.35,
+      "hip_rotation": 0.25,
+      "timing_sync": 0.30,
+      "wrist_position": 0.10
+    },
+    "key_joint_groups": {
+      "arm_alignment": [11, 13, 15, 12, 14, 16],
+      "hip_rotation": [23, 24, 11, 12],
+      "wrist_position": [15, 16]
+    },
+    "timing_critical": true,
+    "timing_weight_override": null,
+    "overlap_sports": ["tennis_serve", "volleyball_spike"],
+    "notes": "Overhead arm arc and contact-point timing are critical. Wrist pronation at contact is key."
+  },
+
+  "basketball_layup": {
+    "display_name": "Basketball Layup",
+    "action_phase_start": 0.3,
+    "weights": {
+      "arm_alignment": 0.25,
+      "hip_rotation": 0.20,
+      "timing_sync": 0.35,
+      "leg_extension": 0.20
+    },
+    "key_joint_groups": {
+      "arm_alignment": [11, 13, 15, 12, 14, 16],
+      "hip_rotation": [23, 24],
+      "leg_extension": [23, 25, 27, 24, 26, 28]
+    },
+    "timing_critical": true,
+    "timing_weight_override": null,
+    "overlap_sports": [],
+    "notes": "Step-jump-release sequence timing dominates. Vertical leap and extension at release point are key."
+  },
+
+  "yoga_pose": {
+    "display_name": "Yoga Pose",
+    "action_phase_start": 0.0,
+    "weights": {
+      "arm_alignment": 0.25,
+      "hip_rotation": 0.25,
+      "timing_sync": 0.10,
+      "full_body_alignment": 0.40
+    },
+    "key_joint_groups": {
+      "arm_alignment": [11, 13, 15, 12, 14, 16],
+      "hip_rotation": [23, 24, 25, 26],
+      "full_body_alignment": [0, 11, 12, 23, 24, 25, 26, 27, 28]
+    },
+    "timing_critical": false,
+    "timing_weight_override": 0.10,
+    "overlap_sports": [],
+    "notes": "Static or slow-flow poses. Full body symmetry and joint angle accuracy matter most. Timing nearly irrelevant."
+  },
+
+  "_generic": {
+    "display_name": "Generic",
+    "action_phase_start": 0.0,
+    "weights": {
+      "arm_alignment": 0.35,
+      "hip_rotation": 0.35,
+      "timing_sync": 0.30
+    },
+    "key_joint_groups": {
+      "arm_alignment": [11, 12, 13, 14, 15, 16],
+      "hip_rotation": [23, 24, 25, 26]
+    },
+    "timing_critical": false,
+    "timing_weight_override": null,
+    "overlap_sports": [],
+    "notes": "Fallback profile for unknown sports."
+  }
+}
