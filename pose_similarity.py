@@ -1,4 +1,5 @@
 import cv2
+import gc
 import numpy as np
 from dataclasses import dataclass
 from typing import Optional
@@ -65,6 +66,7 @@ def extract_keypoints(video_path: str, max_frames: int = 60) -> Optional[np.ndar
             frame_idx += 1
 
     cap.release()
+    gc.collect() 
     return np.array(keypoints) if keypoints else None
 
 
@@ -242,8 +244,8 @@ def extract_keypoints_phased(
             frame_idx += 1
 
     cap.release()
+    gc.collect() 
     return np.array(keypoints) if keypoints else None
-
 
 def normalize_keypoints(keypoints: np.ndarray) -> np.ndarray:
     normalized = []
