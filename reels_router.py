@@ -139,6 +139,16 @@ async def analyze_attempt(
         ref_kps = await loop.run_in_executor(
             None, extract_keypoints_phased, ref_path, 60, action_phase_start
         )
+
+        # Populate skeleton cache for ghost-overlay endpoint (creator path
+        # only — this branch is the "first call with reference_video"). Must
+        # happen before ref_path is deleted below.
+        try:
+            from first_frame_extractor import populate_cache_safe
+            await loop.run_in_executor(None, populate_cache_safe, reel_id, ref_path)
+        except Exception:
+            pass  # never break the existing endpoint behavior
+
         os.remove(ref_path)
 
         if ref_kps is None or len(ref_kps) < 5:
