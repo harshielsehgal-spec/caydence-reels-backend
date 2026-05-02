@@ -162,6 +162,14 @@ def _score_rep_by_rep(
     kf_mapping: dict = {}
     diag_reps: list[dict] = [] if diagnose else []
 
+    # When diagnose=True, we need normalized creator keypoints with visibility
+    # to capture creator_observed values at trajectory anchor frames. Don't
+    # waste the work when diagnose=False — scoring math doesn't need this.
+    creator_full = None
+    if diagnose:
+        creator_norm = normalize_keypoints(creator_kps)
+        creator_full = _attach_visibility(creator_norm, creator_kps)
+
     for idx, pair in enumerate(pairs):
         creator_rep, viewer_rep = pair
         slice_info = extract_rep_slices(creator_kps, attempt_kps, pair)
@@ -252,6 +260,120 @@ def _score_rep_by_rep(
                     "score": int(r.score),
                 })
 
+            # ── Trajectory build (5 anchors across creator rep) ──────────
+            trajectory: list[dict] = []
+            dtw_rep_cost: Optional[float] = None
+
+            if path:
+                # Compute total DTW alignment cost: sum of feature distances
+                # along the warping path, in normalized angle space.
+                # Reuse pose_alignment's feature builder + per-pair distance.
+                try:
+                    from pose_alignment import _concat_angle_features
+                    from pose_similarity import (
+                        normalize_keypoints as _normk,
+                        extract_angle_sequence as _eas,
+                        _DTW_DEFAULT_WEIGHTS as _W,
+                    )
+                    c_feat = _concat_angle_features(
+                        _eas(_normk(slice_info.creator_slice)), _W,
+                    )
+                    v_feat = _concat_angle_features(
+                        _eas(_normk(slice_info.viewer_slice)), _W,
+                    )
+                    cost_sum = 0.0
+                    for c_local, v_local in path:
+                        if 0 <= c_local < len(c_feat) and 0 <= v_local < len(v_feat):
+                            cost_sum += float(np.linalg.norm(
+                                c_feat[c_local] - v_feat[v_local]
+                            ))
+                    dtw_rep_cost = round(cost_sum, 4)
+                except Exception:
+                    dtw_rep_cost = None
+
+                # Forward mapping (creator_local → viewer_local) by walking path
+                creator_to_viewer: dict[int, int] = {}
+                for c_local, v_local in path:
+                    if c_local not in creator_to_viewer:
+                        creator_to_viewer[c_local] = v_local
+
+                def _c_to_v_local(c_local: int) -> Optional[int]:
+                    if not creator_to_viewer:
+                        return None
+                    if c_local in creator_to_viewer:
+                        return creator_to_viewer[c_local]
+                    keys = sorted(creator_to_viewer.keys())
+                    nearest = min(keys, key=lambda k: abs(k - c_local))
+                    return creator_to_viewer[nearest]
+
+                # Anchor at 0%, 25%, 50%, 75%, 100% of creator rep range.
+                # Ranges are inclusive (extract_rep_slices uses end_frame + 1).
+                c_local_max = len(slice_info.creator_slice) - 1
+                v_local_max = len(slice_info.viewer_slice) - 1
+
+                for pct in (0.0, 0.25, 0.5, 0.75, 1.0):
+                    c_local = int(round(c_local_max * pct))
+                    c_local = max(0, min(c_local, c_local_max))
+                    v_local = _c_to_v_local(c_local)
+
+                    if v_local is None:
+                        trajectory.append({
+                            "anchor_pct": pct,
+                            "creator_frame": None,
+                            "viewer_frame": None,
+                            "checks": [],
+                        })
+                        continue
+
+                    v_local = max(0, min(int(v_local), v_local_max))
+                    creator_frame_global = creator_rep.start_frame + c_local
+                    viewer_frame_global = viewer_rep.start_frame + v_local
+                    creator_frame_global = max(
+                        0, min(creator_frame_global, creator_full.shape[0] - 1)
+                    )
+                    viewer_frame_global = max(
+                        0, min(viewer_frame_global, att_full.shape[0] - 1)
+                    )
+
+                    c_frame_data = creator_full[creator_frame_global]
+                    v_frame_data = att_full[viewer_frame_global]
+
+                    anchor_checks: list[dict] = []
+                    for check in rubric.checks:
+                        c_result = run_check(check, c_frame_data)
+                        v_result = run_check(check, v_frame_data)
+                        c_vis: dict[str, float] = {}
+                        v_vis: dict[str, float] = {}
+                        for lm_idx in check.landmarks:
+                            if 0 <= lm_idx < c_frame_data.shape[0]:
+                                c_vis[str(int(lm_idx))] = round(
+                                    float(c_frame_data[lm_idx, 2]), 4
+                                )
+                            if 0 <= lm_idx < v_frame_data.shape[0]:
+                                v_vis[str(int(lm_idx))] = round(
+                                    float(v_frame_data[lm_idx, 2]), 4
+                                )
+                        anchor_checks.append({
+                            "name": check.id,
+                            "creator_observed": (
+                                round(float(c_result.observed), 4)
+                                if c_result.observed is not None else None
+                            ),
+                            "viewer_observed": (
+                                round(float(v_result.observed), 4)
+                                if v_result.observed is not None else None
+                            ),
+                            "creator_visibility": c_vis,
+                            "viewer_visibility": v_vis,
+                        })
+
+                    trajectory.append({
+                        "anchor_pct": pct,
+                        "creator_frame": int(creator_frame_global),
+                        "viewer_frame": int(viewer_frame_global),
+                        "checks": anchor_checks,
+                    })
+
             diag_reps.append({
                 "rep_index": idx,
                 "viewer_range": {
@@ -267,6 +389,8 @@ def _score_rep_by_rep(
                 "dtw_peak_neighbors": dtw_neighbors,
                 "checks": checks_diag,
                 "total": int(overall),
+                "trajectory": trajectory,
+                "dtw_rep_cost": dtw_rep_cost,
             })
 
     final_score = int(round(np.mean(per_rep_scores))) if per_rep_scores else 0
