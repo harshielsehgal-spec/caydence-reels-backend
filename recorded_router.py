@@ -64,6 +64,15 @@ TMP_DIR.mkdir(parents=True, exist_ok=True)
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 
 
+# Mime → extension map. Used by both upload endpoints to derive the on-disk
+# file extension from the client's declared content_type. iPhone Safari sends
+# webm; other clients may send mp4. Both flow through _ensure_mp4 next.
+_MIME_TO_EXT = {
+    "video/webm": ".webm",
+    "video/mp4": ".mp4",
+}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Synchronous scoring callable
 # ─────────────────────────────────────────────────────────────────────────────
@@ -325,7 +334,15 @@ async def upload_recorded(
     if not file.content_type or not file.content_type.startswith("video/"):
         raise HTTPException(400, "invalid file")
 
-    raw_path = TMP_DIR / f"{uuid.uuid4()}.mp4"
+    # Derive extension from content_type so webm uploads keep .webm and
+    # transcode correctly. content_type may include codec params
+    # (e.g. "video/webm;codecs=vp9").
+    mime_base = file.content_type.split(";")[0].strip().lower()
+    ext = _MIME_TO_EXT.get(mime_base)
+    if ext is None:
+        raise HTTPException(400, f"unsupported mime_type: {file.content_type}")
+
+    raw_path = TMP_DIR / f"{uuid.uuid4()}{ext}"
     bytes_written = 0
     try:
         with open(raw_path, "wb") as out:
@@ -362,12 +379,6 @@ class B64UploadBody(BaseModel):
     video_b64: str = Field(..., min_length=1)
     mime_type: str = Field(..., min_length=1)
     sport: Optional[str] = None
-
-
-_MIME_TO_EXT = {
-    "video/webm": ".webm",
-    "video/mp4": ".mp4",
-}
 
 
 @router.post("/upload_recorded_b64")
