@@ -81,8 +81,14 @@ def _score_attempt_sync(
     attempt_path: str,
     reel_id: str,
     sport: Optional[str],
+    diagnose: bool = False,
 ) -> dict:
-    """Run the full scoring pipeline on a clip file. Returns the result dict."""
+    """Run the full scoring pipeline on a clip file. Returns the result dict.
+
+    When diagnose=True, the returned dict has a top-level "diagnostic" key
+    with per-rep diagnostic data. Default False — response is byte-identical
+    to legacy behavior.
+    """
     if reel_id in rubric_store:
         att_duration_ms, _, _ = _probe_video_info(attempt_path)
         sample_target = max(60, min(240, int(att_duration_ms / 100)))
@@ -106,10 +112,16 @@ def _score_attempt_sync(
     if reel_id in rubric_store:
         creator_kps, duration_ms = creator_kps_store[reel_id]
         rubric = rubric_store[reel_id]
-        result = score_with_rubric(
+        scored = score_with_rubric(
             creator_kps, attempt_kps, duration_ms, rubric, None, attempt_fps,
+            diagnose=diagnose,
         )
-        return {**result_to_dict(result), "sport": sport or "generic"}
+        if diagnose:
+            result, diagnostic = scored
+            payload = {**result_to_dict(result), "sport": sport or "generic"}
+            payload["diagnostic"] = diagnostic
+            return payload
+        return {**result_to_dict(scored), "sport": sport or "generic"}
 
     if reel_id not in reference_cache:
         raise HTTPException(
@@ -243,12 +255,16 @@ async def _process_recorded_file(
     raw_path: Path,
     reel_id: str,
     sport: Optional[str],
+    diagnose: bool = False,
 ) -> JSONResponse:
     """
     Given a video file already written to disk, run the trim → score pipeline
     and return the analyze_v2-shape JSON response. Cleans up tmp files in a
     finally block. Used by both upload_recorded (multipart) and
     upload_recorded_b64 (JSON) endpoints.
+
+    When diagnose=True, the response includes a top-level "diagnostic" key
+    with per-rep diagnostic data. Default False — response shape unchanged.
     """
     transcoded_path: Optional[Path] = None
 
@@ -288,7 +304,7 @@ async def _process_recorded_file(
 
         # 4. Score.
         result = await loop.run_in_executor(
-            None, _score_attempt_sync, score_input_path, reel_id, sport
+            None, _score_attempt_sync, score_input_path, reel_id, sport, diagnose
         )
 
         return JSONResponse(result)
@@ -329,8 +345,13 @@ async def upload_recorded(
     reel_id: str = Form(...),
     sport: Optional[str] = Form(None),
     file: UploadFile = File(...),
+    diagnose: bool = False,
 ):
-    """Multipart form-data upload. Original endpoint, kept working for non-Safari clients."""
+    """Multipart form-data upload. Original endpoint, kept working for non-Safari clients.
+
+    Query param: diagnose=true (optional) attaches per-rep diagnostic data
+    to the response. Default false → response shape unchanged.
+    """
     if not file.content_type or not file.content_type.startswith("video/"):
         raise HTTPException(400, "invalid file")
 
@@ -367,7 +388,7 @@ async def upload_recorded(
             pass
         raise
 
-    return await _process_recorded_file(raw_path, reel_id, sport)
+    return await _process_recorded_file(raw_path, reel_id, sport, diagnose=diagnose)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -382,10 +403,13 @@ class B64UploadBody(BaseModel):
 
 
 @router.post("/upload_recorded_b64")
-async def upload_recorded_b64(body: B64UploadBody):
+async def upload_recorded_b64(body: B64UploadBody, diagnose: bool = False):
     """
     Base64 JSON upload. Workaround for iOS Safari, which hangs on
     multipart/form-data fetch. Same response shape as /upload_recorded.
+
+    Query param: diagnose=true (optional) attaches per-rep diagnostic data
+    to the response. Default false → response shape unchanged.
     """
     # Strip optional data-URL prefix (e.g. "data:video/webm;base64,...")
     b64 = body.video_b64
@@ -421,4 +445,4 @@ async def upload_recorded_b64(body: B64UploadBody):
         log.exception("b64 write failed")
         raise HTTPException(500, "scoring failed")
 
-    return await _process_recorded_file(raw_path, body.reel_id, body.sport)
+    return await _process_recorded_file(raw_path, body.reel_id, body.sport, diagnose=diagnose)

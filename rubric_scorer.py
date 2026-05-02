@@ -93,7 +93,8 @@ def score_with_rubric(
     rubric: Rubric,
     sport_weights: Optional[dict] = None,
     fps: float = 30.0,
-) -> RubricScoreResult:
+    diagnose: bool = False,
+) -> RubricScoreResult | tuple[RubricScoreResult, dict]:
     """
     Rep-aware scoring entry point.
 
@@ -102,6 +103,12 @@ def score_with_rubric(
       - If both have ≥1 rep detected → score each paired rep, average.
       - Else fall back to single-frame scoring at the rubric's key frame
         (works for static holds and single-rep rubrics).
+
+    When diagnose=True, returns a tuple (RubricScoreResult, diagnostic_dict)
+    instead of just RubricScoreResult. The diagnostic dict has shape
+    {"reps": [...]} for the rep-by-rep path, or {"reps": [], "fallback": True}
+    for the single-keyframe fallback path. Default is False — return contract
+    is preserved unless diagnose is explicitly enabled.
     """
     # Try rep-based scoring
     creator_reps, _ = segment_reps(creator_keypoints, fps=fps)
@@ -120,14 +127,18 @@ def score_with_rubric(
                 creator_keypoints, attempt_keypoints,
                 att_full, rubric, pairs,
                 creator_reps, viewer_reps,
+                diagnose=diagnose,
             )
 
     # Fallback: single-frame scoring at the rubric's designated key frame
-    return _score_single_keyframe(
+    result = _score_single_keyframe(
         creator_keypoints, attempt_keypoints,
         att_full, rubric, creator_video_duration_ms,
         creator_reps, viewer_reps,
     )
+    if diagnose:
+        return result, {"reps": [], "fallback": True}
+    return result
 
 
 def _score_rep_by_rep(
@@ -138,16 +149,25 @@ def _score_rep_by_rep(
     pairs,
     creator_reps,
     viewer_reps,
-) -> RubricScoreResult:
-    """Score each paired rep, average. No rep-count penalty."""
+    diagnose: bool = False,
+) -> RubricScoreResult | tuple[RubricScoreResult, dict]:
+    """Score each paired rep, average. No rep-count penalty.
+
+    When diagnose=True, returns (RubricScoreResult, {"reps": [...]}) where each
+    rep entry exposes the DTW path neighborhood, observed/target/tolerance per
+    check, and per-landmark visibility. Read-only; does not affect scoring.
+    """
     per_rep_scores: list[int] = []
     all_results: list[CheckResult] = []
     kf_mapping: dict = {}
+    diag_reps: list[dict] = [] if diagnose else []
 
     for idx, pair in enumerate(pairs):
+        creator_rep, viewer_rep = pair
         slice_info = extract_rep_slices(creator_kps, attempt_kps, pair)
 
         # DTW just this rep
+        path: list[tuple[int, int]] = []
         try:
             path = align_sequences(slice_info.creator_slice, slice_info.viewer_slice)
             mapping = path_to_mapping(path, len(slice_info.creator_slice))
@@ -167,6 +187,88 @@ def _score_rep_by_rep(
         all_results.extend(results)
         kf_mapping[f"rep_{idx + 1}"] = viewer_peak_global
 
+        # ── Diagnostic build (read-only, runs alongside scoring) ─────────────
+        if diagnose:
+            # Map the viewer rep's [start, peak, end] back to the creator
+            # frames they DTW-aligned to, in global creator-frame indices.
+            v_start_local = 0
+            v_end_local = max(0, len(slice_info.viewer_slice) - 1)
+            # Reverse mapping (viewer_local → creator_local) by walking the path
+            viewer_to_creator: dict[int, int] = {}
+            for c_local, v_local in path:
+                # Keep the median-equivalent: last write wins is fine for
+                # monotonic paths, but prefer first stable mapping
+                if v_local not in viewer_to_creator:
+                    viewer_to_creator[v_local] = c_local
+
+            def _v_to_c_global(v_local: int) -> Optional[int]:
+                if not viewer_to_creator:
+                    return None
+                # Snap to nearest mapped viewer-local frame
+                if v_local in viewer_to_creator:
+                    c_local = viewer_to_creator[v_local]
+                else:
+                    keys = sorted(viewer_to_creator.keys())
+                    nearest = min(keys, key=lambda k: abs(k - v_local))
+                    c_local = viewer_to_creator[nearest]
+                return creator_rep.start_frame + int(c_local)
+
+            creator_match_start = _v_to_c_global(v_start_local)
+            creator_match_peak = _v_to_c_global(viewer_peak_local)
+            creator_match_end = _v_to_c_global(v_end_local)
+
+            # 5 path entries centered on viewer peak local — what creator
+            # frames did DTW match to viewer_peak−2..viewer_peak+2?
+            dtw_neighbors: dict[str, Optional[int]] = {}
+            for offset in (-2, -1, 0, 1, 2):
+                v_local = viewer_peak_local + offset
+                if v_local < 0 or v_local >= len(slice_info.viewer_slice):
+                    dtw_neighbors[str(offset)] = None
+                else:
+                    dtw_neighbors[str(offset)] = _v_to_c_global(v_local)
+
+            # Per-check diagnostics for this rep's results.
+            check_specs_by_id = {c.id: c for c in rubric.checks}
+            checks_diag: list[dict] = []
+            # Visibility lookup uses the raw (un-normalized) viewer keypoints
+            # at the matched frame, since att_full has normalized xy + raw vis.
+            viewer_frame_for_vis = att_full[viewer_peak_global]  # (33, 3)
+
+            for r in results:
+                spec = check_specs_by_id.get(r.check_id)
+                landmarks = spec.landmarks if spec else []
+                vis_dict: dict[str, float] = {}
+                for lm_idx in landmarks:
+                    if 0 <= lm_idx < viewer_frame_for_vis.shape[0]:
+                        vis_dict[str(int(lm_idx))] = round(
+                            float(viewer_frame_for_vis[lm_idx, 2]), 4
+                        )
+                checks_diag.append({
+                    "name": r.check_id,
+                    "target": round(float(r.target), 4) if r.target is not None else None,
+                    "tolerance": round(float(r.tolerance), 4) if r.tolerance is not None else None,
+                    "observed": round(float(r.observed), 4) if r.observed is not None else None,
+                    "visibility": vis_dict,
+                    "score": int(r.score),
+                })
+
+            diag_reps.append({
+                "rep_index": idx,
+                "viewer_range": {
+                    "start": int(viewer_rep.start_frame),
+                    "peak": int(viewer_peak_global),
+                    "end": int(viewer_rep.end_frame),
+                },
+                "creator_match": {
+                    "start": creator_match_start,
+                    "peak": creator_match_peak,
+                    "end": creator_match_end,
+                },
+                "dtw_peak_neighbors": dtw_neighbors,
+                "checks": checks_diag,
+                "total": int(overall),
+            })
+
     final_score = int(round(np.mean(per_rep_scores))) if per_rep_scores else 0
     arm, hip, timing = _derive_legacy_scores(all_results, rubric)
     avg_conf = float(np.mean([r.confidence for r in all_results if r.passed])) if all_results else 0.0
@@ -178,7 +280,7 @@ def _score_rep_by_rep(
     best_start = best_rep_idx * checks_per_rep
     best_results = all_results[best_start:best_start + checks_per_rep]
 
-    return RubricScoreResult(
+    result = RubricScoreResult(
         score=final_score,
         arm_alignment=arm,
         hip_position=hip,
@@ -197,6 +299,10 @@ def _score_rep_by_rep(
         rep_count_paired=len(pairs),
         per_rep_scores=per_rep_scores,
     )
+
+    if diagnose:
+        return result, {"reps": diag_reps}
+    return result
 
 
 def _score_single_keyframe(
