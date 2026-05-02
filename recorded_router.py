@@ -15,7 +15,9 @@ import base64
 import binascii
 import logging
 import os
+import subprocess
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -122,6 +124,109 @@ def _score_attempt_sync(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Transcode helper: webm → mp4 (iPhone Safari produces vp9 webm; OpenCV on
+# Render's Linux build cannot decode vp9 reliably)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ffmpeg binary resolution. imageio_ffmpeg ships a static binary so we don't
+# depend on Render's base image including ffmpeg. Lazy-import so a missing
+# install fails loudly only when the helper is actually called.
+def _ffmpeg_exe() -> str:
+    from imageio_ffmpeg import get_ffmpeg_exe
+    return get_ffmpeg_exe()
+
+
+# Sanity ceiling for total_frames. 100k frames at 30fps = ~55 minutes, far
+# beyond any 15s recording. Anything above this is a decode garbage value.
+_MAX_REASONABLE_FRAMES = 100_000
+
+
+def _ensure_mp4(input_path: str) -> str:
+    """
+    Ensure the input video is mp4. If already mp4, return path unchanged.
+    If webm, transcode to a sibling _transcoded.mp4 file using ffmpeg
+    (imageio-ffmpeg's bundled binary, no host dependency).
+
+    Raises HTTPException(500, "transcode failed") on any ffmpeg failure.
+    """
+    p = Path(input_path)
+    if p.suffix.lower() == ".mp4":
+        return input_path
+
+    if p.suffix.lower() != ".webm":
+        # Defensive: only mp4 and webm reach here per _MIME_TO_EXT
+        raise HTTPException(500, "transcode failed")
+
+    output_path = p.parent / f"{p.stem}_transcoded.mp4"
+    cmd = [
+        _ffmpeg_exe(),
+        "-i", str(p),
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-an",       # drop audio — pose pipeline doesn't need it
+        "-y",        # overwrite output if exists
+        str(output_path),
+    ]
+
+    start = time.monotonic()
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        log.error("ffmpeg timeout input=%s", input_path)
+        raise HTTPException(500, "transcode failed")
+    except Exception as e:
+        log.exception("ffmpeg subprocess failed input=%s err=%s", input_path, e)
+        raise HTTPException(500, "transcode failed")
+
+    elapsed = time.monotonic() - start
+
+    if result.returncode != 0:
+        # stderr is bytes; decode best-effort for log only, don't surface to client
+        stderr_snippet = (result.stderr or b"").decode("utf-8", errors="replace")[:500]
+        log.error(
+            "ffmpeg non-zero exit input=%s rc=%d stderr=%s",
+            input_path, result.returncode, stderr_snippet,
+        )
+        raise HTTPException(500, "transcode failed")
+
+    log.info(
+        "transcode webm→mp4 input=%s output=%s duration=%.2fs",
+        input_path, str(output_path), elapsed,
+    )
+    return str(output_path)
+
+
+def _check_decodable(mp4_path: str) -> None:
+    """
+    Verify the mp4 has a sane frame count before handing it to the pose
+    pipeline. cv2.VideoCapture returns garbage values on undecodable inputs
+    (e.g. -433498485732174464 on certain webm/vp9 files), which propagate
+    into np.linspace and crash the worker. We catch that here.
+
+    Raises HTTPException(500, "video decode failed") on any unreasonable
+    frame count.
+    """
+    import cv2
+    cap = cv2.VideoCapture(mp4_path)
+    try:
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    finally:
+        cap.release()
+
+    if total_frames <= 0 or total_frames > _MAX_REASONABLE_FRAMES:
+        log.error(
+            "decode check failed path=%s total_frames=%d",
+            mp4_path, total_frames,
+        )
+        raise HTTPException(500, "video decode failed")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Shared post-write pipeline: trim → score → cleanup
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -136,12 +241,28 @@ async def _process_recorded_file(
     finally block. Used by both upload_recorded (multipart) and
     upload_recorded_b64 (JSON) endpoints.
     """
-    trimmed_path = raw_path.parent / f"{raw_path.stem}_trimmed{raw_path.suffix}"
+    transcoded_path: Optional[Path] = None
 
     try:
         loop = asyncio.get_event_loop()
+
+        # 1. Ensure mp4. Transcodes webm → mp4 via ffmpeg if needed.
+        mp4_path_str = await loop.run_in_executor(
+            None, _ensure_mp4, str(raw_path)
+        )
+        if mp4_path_str != str(raw_path):
+            transcoded_path = Path(mp4_path_str)
+
+        # 2. Defensive decode check. Catches degenerate mp4s
+        # (transcode succeeded but produced 0-frame or corrupt output).
+        await loop.run_in_executor(None, _check_decodable, mp4_path_str)
+
+        # 3. Trim. Operates on mp4.
+        mp4_path = Path(mp4_path_str)
+        trimmed_path = mp4_path.parent / f"{mp4_path.stem}_trimmed.mp4"
+
         trim_result = await loop.run_in_executor(
-            None, trim_clip, str(raw_path), str(trimmed_path)
+            None, trim_clip, mp4_path_str, str(trimmed_path)
         )
 
         if trim_result.get("trimmed"):
@@ -154,8 +275,9 @@ async def _process_recorded_file(
                 trim_result.get("window"),
                 trim_result.get("skip_reason"),
             )
-            score_input_path = str(raw_path)
+            score_input_path = mp4_path_str
 
+        # 4. Score.
         result = await loop.run_in_executor(
             None, _score_attempt_sync, score_input_path, reel_id, sport
         )
@@ -168,7 +290,19 @@ async def _process_recorded_file(
         log.exception("processing failed clip_id=%s", raw_path.stem)
         raise HTTPException(500, "scoring failed")
     finally:
-        for p in (raw_path, trimmed_path):
+        # Clean up: original raw, transcoded mp4 (if any), trimmed file.
+        cleanup_targets = [raw_path]
+        if transcoded_path is not None:
+            cleanup_targets.append(transcoded_path)
+            cleanup_targets.append(
+                transcoded_path.parent / f"{transcoded_path.stem}_trimmed.mp4"
+            )
+        else:
+            cleanup_targets.append(
+                raw_path.parent / f"{raw_path.stem}_trimmed{raw_path.suffix}"
+            )
+
+        for p in cleanup_targets:
             try:
                 if p.exists():
                     p.unlink()
