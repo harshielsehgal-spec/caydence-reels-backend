@@ -111,8 +111,18 @@ def score_with_rubric(
     is preserved unless diagnose is explicitly enabled.
     """
     # Try rep-based scoring
-    creator_reps, _ = segment_reps(creator_keypoints, fps=fps)
-    viewer_reps, _ = segment_reps(attempt_keypoints, fps=fps)
+    if diagnose:
+        creator_reps, _, creator_seg_diag = segment_reps(
+            creator_keypoints, fps=fps, diagnose=True,
+        )
+        viewer_reps, _, viewer_seg_diag = segment_reps(
+            attempt_keypoints, fps=fps, diagnose=True,
+        )
+    else:
+        creator_reps, _ = segment_reps(creator_keypoints, fps=fps)
+        viewer_reps, _ = segment_reps(attempt_keypoints, fps=fps)
+        creator_seg_diag = None
+        viewer_seg_diag = None
 
     att_norm = normalize_keypoints(attempt_keypoints)
     att_full = _attach_visibility(att_norm, attempt_keypoints)
@@ -123,12 +133,20 @@ def score_with_rubric(
             len(creator_keypoints), len(attempt_keypoints),
         )
         if pairs:
-            return _score_rep_by_rep(
+            res = _score_rep_by_rep(
                 creator_keypoints, attempt_keypoints,
                 att_full, rubric, pairs,
                 creator_reps, viewer_reps,
                 diagnose=diagnose,
             )
+            if diagnose and isinstance(res, tuple):
+                result, diag = res
+                diag["rep_detection"] = {
+                    "creator": creator_seg_diag,
+                    "viewer": viewer_seg_diag,
+                }
+                return result, diag
+            return res
 
     # Fallback: single-frame scoring at the rubric's designated key frame
     result = _score_single_keyframe(
@@ -137,7 +155,14 @@ def score_with_rubric(
         creator_reps, viewer_reps,
     )
     if diagnose:
-        return result, {"reps": [], "fallback": True}
+        return result, {
+            "reps": [],
+            "fallback": True,
+            "rep_detection": {
+                "creator": creator_seg_diag,
+                "viewer": viewer_seg_diag,
+            },
+        }
     return result
 
 
