@@ -31,12 +31,14 @@ from pose_similarity import extract_keypoints, extract_keypoints_phased
 from rubric_scorer import score_with_rubric, result_to_dict
 from sport_scorer import compute_sport_similarity, get_profile
 
-# Share state with the existing routers — same dicts, no duplication
+# Share state with rubric_router, AND import the hydrate helper so this
+# endpoint also falls back to Supabase on cold-start cache misses.
 try:
     from rubric_router import (  # type: ignore
         rubric_store,
         creator_kps_store,
         _probe_video_info,
+        _hydrate_from_supabase,
     )
     from reels_router import reference_cache  # type: ignore
 except ImportError:
@@ -51,6 +53,8 @@ except ImportError:
         cap.release()
         duration_ms = int((frames / fps) * 1000) if fps > 0 else 0
         return duration_ms, float(fps), frames
+    def _hydrate_from_supabase(reel_id: str) -> bool:
+        return reel_id in rubric_store
 
 log = logging.getLogger(__name__)
 
@@ -88,8 +92,14 @@ def _score_attempt_sync(
     When diagnose=True, the returned dict has a top-level "diagnostic" key
     with per-rep diagnostic data. Default False — response is byte-identical
     to legacy behavior.
+
+    Hydrates rubric from Supabase if not in memory (survives Render cold starts).
     """
-    if reel_id in rubric_store:
+    # Try memory first, then Supabase. After this call rubric_store will have
+    # the rubric if it exists anywhere (memory or persistent storage).
+    has_rubric = _hydrate_from_supabase(reel_id)
+
+    if has_rubric:
         att_duration_ms, _, _ = _probe_video_info(attempt_path)
         sample_target = max(60, min(240, int(att_duration_ms / 100)))
         attempt_kps = extract_keypoints(attempt_path, sample_target)
@@ -109,7 +119,7 @@ def _score_attempt_sync(
             "Could not extract pose. Ensure full body is visible and well-lit.",
         )
 
-    if reel_id in rubric_store:
+    if has_rubric:
         creator_kps, duration_ms = creator_kps_store[reel_id]
         rubric = rubric_store[reel_id]
         scored = score_with_rubric(
