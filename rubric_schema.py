@@ -83,7 +83,7 @@ GENERIC_RELATIVE_POSITION_TOLERANCE = 0.08
 # Minimum variance floor — if creator's own consistency is below this,
 # use the defaults above instead. Prevents tolerance collapse on shaky videos.
 MIN_VARIANCE_FLOOR: dict[CheckType, float] = {
-    "angle": 8.0,            # degrees
+    "angle": 3.0,            # degrees
     "distance": 0.02,        # torso-normalized units
     "alignment": 0.02,
     "relative_position": 0.015,
