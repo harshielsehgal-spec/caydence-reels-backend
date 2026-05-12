@@ -19,3 +19,4 @@ skeleton_overlay*.png
 # Editor
 .vscode/
 .idea/
+.env.env
